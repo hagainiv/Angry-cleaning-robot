@@ -12,9 +12,11 @@ sqr = function(m){return m*m};
 // general utility
 dom = function(id){return document.getElementById(id);};
 do_times = function(func, times){for (var i=0; i<times; i++)func();};
+parse_num = function(v){return Number.parseFloat(v).toPrecision(2);}
 
 // Color constants
 BLACK = 'rgb(0,0,0)';
+
 const ENTITY_COLORS = {
 	'white': ['rgb(255, 255, 255)', 'rgb(63, 63, 63)', 'rgb(31, 31, 31)', 'rgb(15, 15, 15)'],
 	'red': ['rgb(255, 0, 0)', 'rgb(127, 0, 0)', 'rgb(63, 0, 0)', 'rgb(31, 0, 0)'],
@@ -35,6 +37,30 @@ const MESSAGE_BACKGROUNDS = {
 	'offline': 'rgb(255, 0, 0, 0.2)'
 };
 
+// Torus geometry
+torus = {
+	delta_coor: function(x1, x2){
+		var dx = frac_part(x1-x2);
+		var dx = dx > 0.5? (dx-1):dx;
+		return dx;
+	},
+	relative_coor: function(x0, y0, rotation, x, y){
+		var dx = this.delta_coor(x, x0);
+		var dy = this.delta_coor(y, y0);
+		var angle = (2*Math.PI / FULL_ROTATION) * rotation;
+		var new_x = dx * Math.cos(angle) - dy * Math.sin(angle);
+		var new_y = dx * Math.sin(angle) + dy * Math.cos(angle);
+		return [new_x, new_y];
+	},
+	
+	sqr_dist: function(x1, y1, x2, y2){
+		var dx = frac_part(x1-x2);
+		var dy = frac_part(y1-y2);
+		dx = Math.min(dx, 1-dx);
+		dy = Math.min(dy, 1-dy);
+		return sqr(dx)+sqr(dy);
+	}
+};
 
 // Game Logic
 // -----------------------------------------------------------------
@@ -130,7 +156,8 @@ collision_manager = {
 					for (var test_entity of collision_manager.collision_grid[test_key]){
 						if (test_entity.kill || !test_entity.active || (test_entity === entity))
 							continue;
-						if (sqr(x-test_entity.x) + sqr(y-test_entity.y) <= sqr(test_entity.radius+radius))
+						sqr_dist = torus.sqr_dist(x, y, test_entity.x, test_entity.y);
+						if (sqr_dist <= sqr(test_entity.radius+radius))
 							return test_entity;
 					}
 			}
@@ -149,7 +176,6 @@ game_state = {};
 set_state = function(new_state, counter_sec){	
 	[game_state.core_message, game_state.color] = {
 		'online': ['SYSTEM ONLINE', 'online'],
-		'task': ['CLEAN TRAGET WITHIN # SECONDS', 'warning'],
 		'error': ['ERROR DETECTED. DISCONNECT IN # SECONDS', 'warning'],
 		'offline': ['SYSTEM OFFLINE', 'offline'],
 		'reconnect': ['ERROR REPAIRED. RECONNECT IN # SECONDS', 'warning']
@@ -165,21 +191,7 @@ combat_state = function(){
 switch_state = function(){
 	switch (game_state.state){
 		case 'online':
-			p = Math.random();
-			if (p < 0.9)
-				set_state('error', 5);
-			else {
-				set_state('task', 30);
-				set_middle_message('follow the green arrow');
-				teleport_outside_view(stain);
-				stain.active = true;
-			}
-			break;
-		case 'task':
-			clearInterval(platform.interval);
-			dom('mission-death-message').style.display = 'block';
-			window.onkeydown=null;
-			window.onkeyup=null;
+			set_state('error', 5);
 			break;
 		case 'error':
 			set_state('offline', 30);
@@ -259,18 +271,6 @@ avatar = {
 	}
 };
 
-stain = {
-	type: 'stain',
-	kill: false,
-	active: false,
-	blocker: false,
-	moving: false,
-	color: 'yellow',
-	x: 0.701, y: 0.501,
-	rotation: 0,
-	radius: ROBOT_RADIUS,
-};
-
 robot_mind = function(){
 	var me = this;
 	var SQR_SIGHT_RADIUS = 0.0025;
@@ -289,8 +289,6 @@ robot_mind = function(){
 	};
 	
 	// reset and update
-	me.direction = 1;
-	me.linear_velocity = 0.002;
 	me.color='white';
 	if (me.cooldown > 0)
 		me.cooldown-=1;
@@ -322,8 +320,8 @@ robot_mind = function(){
 						continue;
 					if (test_entity.type == 'bullet' && test_entity.origin === me)
 						continue;
-					var delta_x = test_entity.x - me.x;
-					var delta_y = test_entity.y - me.y;
+					var delta_x = torus.delta_coor(test_entity.x, me.x);
+					var delta_y = torus.delta_coor(test_entity.y, me.y);
 					var sqr_dist = sqr(delta_x) + sqr(delta_y);
 					if (sqr_dist > SQR_SIGHT_RADIUS)
 						continue;
@@ -347,64 +345,70 @@ robot_mind = function(){
 		
 	// Resolve
 	// ------------------------------------------
-	p = Math.random();
-	
-	// They shooting at me!
-	if (seen_bullet){
-		me.direction = -1;
-		return;
-	}
-	
-	// Stay far from other robots
-	if (seen_robot){
+	if (combat_state()){
 		
-		// I see my enemy, shoot!
-		if (combat_state() && me.cooldown == 0){
+		// a bullet! run away!
+		if (seen_bullet)
+			me.direction = -1;
+		
+		// see an enemy
+		else if (seen_robot){
 			
-			// have a clear shot
-			if (seen_robot['cos_ang']>0.9){
-				me.linear_velocity = 0.0005;
+			// have a clear shoot
+			if (me.cooldown == 0 && seen_robot['cos_ang']>0.9){
 				entity_manager.add(create_bullet(me, me.x, avatar.y, me.rotation, me.color));
 				me.cooldown = 15;
 			}
 			
-			// get a better angle
-			else{	
+			// improve aiming angle
+			else {
+				
 				angle_dir_sign = Math.sign(delta_x*dir_y-delta_y*dir_x);
 				me.angular_direction = angle_dir_sign;
+			}
+			
+			// if too close, keep a fair distance
+			sqr_dist = sqr(seen_robot['dx']) + sqr(seen_robot['dy'])
+			if (sqr_dist < 0.25 *SQR_SIGHT_RADIUS)
 				me.direction = -1;
-				me.action_cooldown = 10;
-			}
-		}
-		else {
-			// rotate, so we won't block each other
-			if (me.action_cooldown > 0){
-				me.action_cooldown-=1;
-				return;
-			}
-			if (p<0.5)
-				me.angular_direction = -1;
-			else
-				me.angular_direction =1;
-			me.action_cooldown = 10;
+			
+			// pursue enemy 
+			else (sqr_dist > 0.25 *SQR_SIGHT_RADIUS)
+				me.direction = 1;
 		}
 	}
 	else {
+		
+		// if i'm doing something, keep doing it
 		if (me.action_cooldown > 0){
 			me.action_cooldown-=1;
 			return;
 		}
-		if (p<0.15)
-			me.angular_direction = -1;
-		else if (p<0.3)
-			me.angular_direction = 1;
-		me.action_cooldown = 10;
+		
+		// if too close to another robot, keep a fair distance		
+		if (seen_robot && sqr_dist < 0.5 *SQR_SIGHT_RADIUS){
+			sqr_dist = sqr(seen_robot['dx']) + sqr(seen_robot['dy'])
+			if (sqr_dist < 0.25 *SQR_SIGHT_RADIUS){
+				me.direction = -1;
+				me.action_cooldown = 10;
+				return;
+			}
+		}
+		
+		// wonder around
+		else {
+			p = Math.random();
+			if (p<0.15)
+				me.angular_direction = -1;
+			else if (p<0.3)
+				me.angular_direction = 1;
+			me.direction = 1;
+			me.action_cooldown = 10;
+		}
 	}
-
 };
 
 restart_game_logic = function(){
-	entity_manager.add(stain);
 	entity_manager.add(avatar);
 	
 	// other robots
@@ -536,6 +540,7 @@ create_bullet = function(origin, x, y, rotation, color){
 	return bullet;
 };
 
+
 // Graphics
 // -----------------------------------------------------------------
 // *****************************************************************
@@ -544,23 +549,17 @@ const VIEW_FACTOR = 10;
 const RATIO = 0.5*VIEW_FACTOR*CANVAS_SIZE;
 
 relative_coor = function(x, y){
-	var relative_x = x-avatar.x;
-	var relative_y = y-avatar.y;
-	var angle = (2*Math.PI / FULL_ROTATION) * avatar.rotation;
-	var new_x = relative_x * Math.cos(angle) - relative_y * Math.sin(angle);
-	var new_y = relative_x * Math.sin(angle) + relative_y * Math.cos(angle);
-	return [new_x, new_y];
+	return torus.relative_coor(avatar.x, avatar.y, avatar.rotation, x, y);
 };
 
 out_of_view = function(x, y){
-	var [new_x, new_y] = relative_coor(x, y);
-	return (Math.abs(new_x)* VIEW_FACTOR > 1 || Math.abs(new_y) * VIEW_FACTOR > 1);
+	sqr_dist = torus.sqr_dist(x, y, avatar.x, avatar.y);
+	return (sqr_dist * sqr(VIEW_FACTOR) > 2);
 };
 
 transform = function(x, y, rotation){
 	platform.canvas_context.save();
-	var new_x, new_y;
-	[new_x, new_y] = relative_coor(x, y);
+	var [new_x, new_y] = relative_coor(x, y);
 	var canvas_center_x = RATIO*new_x;
 	var canvas_center_y = RATIO*new_y;
 	relative_rotation = fix_rotation(rotation-avatar.rotation);
@@ -668,55 +667,6 @@ draw_clip = function(entity){
 	platform.canvas_context.restore();
 }
 
-draw_stain = function(entity, stage=0){
-	if (out_of_view(entity.x, entity.y))
-		return;
-	transform(entity.x, entity.y, entity.rotation);
-	
-	// draw main circle
-	platform.canvas_context.fillStyle = ENTITY_COLORS[entity.color][stage];
-	platform.canvas_context.beginPath();
-	platform.canvas_context.arc(0, 0, 12, 0, 2*Math.PI);
-	platform.canvas_context.fill();
-	
-	// draw secondary circles
-	platform.canvas_context.beginPath();
-	platform.canvas_context.arc(8, 8, 8, 0, 2*Math.PI);
-	platform.canvas_context.fill();
-	
-	platform.canvas_context.beginPath();
-	platform.canvas_context.arc(-8, 0, 6, 0, 2*Math.PI);
-	platform.canvas_context.fill();
-	
-	platform.canvas_context.restore();
-};
-
-draw_mission_arrow = function(){
-	[dx, dy] = relative_coor(stain.x, stain.y);
-	var r_sqr = dx*dx + dy*dy;
-	if (r_sqr < 0.9/(VIEW_FACTOR*VIEW_FACTOR))
-		return;		// Too close to draw
-	var vx = dx / Math.sqrt(r_sqr);
-	var vy = dy / Math.sqrt(r_sqr);
-	var ox = vy;
-	var oy = -vx;
-	
-	// arrow
-	var base_x = 0.8 * vx;
-	var base_y = 0.8 * vy;
-	var head_x = 0.05 * vx;
-	var head_y = 0.05 * vy;
-	var side_x = 0.03 * ox;
-	var side_y = 0.03 * oy;
-	
-	platform.canvas_context.fillStyle = MESSAGE_COLORS['online'];
-	platform.canvas_context.beginPath();
-	platform.canvas_context.moveTo(0.5*CANVAS_SIZE*(base_x+head_x), 0.5*CANVAS_SIZE*(base_y+head_y));
-	platform.canvas_context.lineTo(0.5*CANVAS_SIZE*(base_x+side_x), 0.5*CANVAS_SIZE*(base_y+side_y));
-	platform.canvas_context.lineTo(0.5*CANVAS_SIZE*(base_x-side_x), 0.5*CANVAS_SIZE*(base_y-side_y));
-	platform.canvas_context.fill();
-};
-
 draw_bullet = function(entity, stage=0){
 	if (out_of_view(entity.x, entity.y))
 		return;
@@ -797,7 +747,6 @@ key_up = function(e){
 };
 
 
-
 // Engine
 // -----------------------------------------------------------------
 // *****************************************************************
@@ -824,7 +773,6 @@ game_loop = function(e){
 			drawing_function = {
 				'avatar': draw_robot,
 				'robot': draw_robot,
-				'stain': draw_stain,
 			}[corpse.type]; 
 			drawing_function(corpse, corpse.span);
 			to_reserve.push(corpse);
@@ -844,7 +792,6 @@ game_loop = function(e){
 		drawing_function = {
 			'avatar': draw_robot,
 			'robot': draw_robot,
-			'stain': draw_stain,
 			'bullet': draw_bullet,
 			'health': draw_health,
 			'clip': draw_clip
@@ -855,8 +802,7 @@ game_loop = function(e){
 	// clean entities
 	entity_manager.clean_up();
 	
-	if (game_state.state == 'task')
-		draw_mission_arrow();
+	dom('coor').innerHTML = parse_num(avatar.x) +', ' +parse_num(avatar.y);
 	
 	// game status
 	game_state.counter_steps -=1;
@@ -908,7 +854,6 @@ resume = function(){
 	window.onkeyup = key_up;
 	platform.interval = setInterval(game_loop, TIME_INTERVAL);
 };
-update = function(){};
 
 window.onload = function(e){
 	init();
